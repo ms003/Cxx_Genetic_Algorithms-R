@@ -1,0 +1,575 @@
+---
+title: "CS971_Assignment3"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Import Packages
+```{r, include= FALSE }
+library("TTR")
+library(gramEvol)
+library(quantmod)
+library(tsdl)
+library(forecast)
+tsdl
+meta_tsdl$description
+
+```
+Import seasonal rainfall data, convert into data-frame and check for nulls
+
+
+```{r }
+Rnfall.ts <- tsdl[[636]]
+Rnfall.ts
+
+rnf <- data.frame(Rnfall.ts)
+head(rnf)
+dim(rnf)
+sum(is.na(rnf))
+```
+**Part1: Exploratory Analysis**
+
+Exploratory analysis. We plotted the data and we see the strong seasonal element that contributes to most of the data behaviour. We also observe quite a strong variation in the trend and a rather less random element.
+```{r}
+plot(Rnfall.ts)
+rnfallcomponents<- decompose(Rnfall.ts)
+plot(rnfallcomponents)
+
+
+```
+
+Next we create the adjusted data but deducting the seasonal component. We see that the data still keeps the oscillatory behaviour. However, for the downstream analysis we chose to work with the raw data and the trend component. The reason we did not choose the adjusted components is because it look remarkably similar to the random component, so there was a concern as how efficient it would be the model if there was such strong stochastic factor within it.
+```{r}
+seasonal_adjusted <- Rnfall.ts - rnfallcomponents$seasonal
+plot(seasonal_adjusted)
+
+rnf_trend <- rnfallcomponents$trend
+plot(rnf_trend)
+
+```
+**Part 2: Generating Grammatical Evolution Models for the rainfall data-set.**
+Originally,  I tried generating the model on the raw data. However, since the model was showing very often signs of over-fitting , I applied SMA, where it calculates the mean of a consecutive window of observations.  Although, there is not an obvious visual difference before and after applying SMA, this has helped greatly the model performance to deliver a model with quite good score. I also tried applying Long transformation and scaling but it did not improve the model perfrormance. 
+
+
+Creating two different data-frames one for the raw_SMA data and one for the trend component. Also removing the nulls.
+```{r}
+rnf <- data.frame(Rnfall.ts)
+
+rnfSMA <- SMA(rnf)
+plot(rnf)
+plot.ts(rnfSMA)
+sum(is.na(rnfSMA))
+rnfSMA<-na.omit(rnfSMA)
+sum(is.na(rnfSMA))
+#head(rnfSMA)
+
+rnf_trend <- data.frame (rnfallcomponents$trend)
+#dim(rnf_trend)
+sum(is.na(rnf_trend))
+rnf_trend<-na.omit(rnf_trend)
+sum(is.na(rnf_trend))
+
+rnf_log <- log(rnf)
+sum(is.na(rnf_log))
+
+```
+**Model1 : SMA rainfall data with 12 lags,as many as the seasonal element**
+
+Creating 12 lag that we will use for building all the model..
+
+SMA rainfall data Lags
+
+```{r}
+
+rnf_lag0 <- data.frame( x12=Lag(rnfSMA,12),x11=Lag(rnfSMA,11),x10=Lag(rnfSMA,10),x9=Lag(rnfSMA,9),x8=Lag(rnfSMA,8),x7=Lag(rnfSMA,7),x6=Lag(rnfSMA,6),x5=Lag(rnfSMA,5),x4=Lag(rnfSMA,4),x3=Lag(rnfSMA,3),x3=Lag(rnfSMA,3), x2=Lag(rnfSMA,2), x1=Lag(rnfSMA,1), rnfSMA)
+names(rnf_lag0) <- c('x12', 'x11','x10','x9','x8', 'x7', 'x6', 'x5', 'x4', 'x3','x2','x1','x')
+
+head(rnf_lag0)
+dim(rnf_lag0)
+
+
+```
+Split the Data into train and test set
+```{r }
+train_rnf_12 <- data.frame(rnf_lag0[13:129,])
+test_rnf_12<- rnf_lag0[130:159,]
+head(train_rnf_12)
+head(test_rnf_12)
+
+```
+
+Generating the grammar for GramEvol. I have added more arithmetic operations and  functions as well as a numerical vector that can be used to map relationship between variables
+
+```{r, include=FALSE}
+mydata <- test_rnf_12
+rules0 <- list(expr = grule(op(expr, expr), func(expr), var),
+               func = grule(sin, cos, exp, log, sqrt),
+               op = grule('+', '-', '*', '/', '^'),
+               var = grule(mydata$x12,mydata$x11,mydata$x10,mydata$x9,mydata$x8,mydata$x7,mydata$x6,mydata$x5,mydata$x4,mydata$x3, mydata$x2, mydata$x1, n),
+               n = grule(1, 2, 3, 4, 5, 6, 7, 8, 9))
+
+new_Gram_lag12 <- CreateGrammar(rules0)
+new_Gram_lag12
+
+newFitFunc <- function(expr) {
+  result <- eval(expr)
+  if (any(is.nan(result)))
+    return(Inf)
+  return (sqrt(mean((mydata$x - result)^2)))
+}
+```
+For the GRammatical Evolution parameters I have changed the optimizer to es which uses the evolutionary strategy. With the default "auto" the algorithm did not converge. I also increased a bit the number  or wrappings as a precaution since the model has problems to converge. Increasing the max.depth resulted more often in overfitting that returned as function the original column.
+
+```{r, include=FALSE}
+ge0 <- GrammaticalEvolution(new_Gram_lag12, newFitFunc, terminationCost = 0.1, max.depth = 5, optimizer = "es", wrappings = 5)
+ge0
+```
+Grammatical Evolution Expression Model for raw rainfall data with 3 lags
+```{r}
+ge_rnf_12lag <- ge0
+ge_rnf_12lag$best$expressions
+head(eval(ge_rnf_12lag$best$expressions))
+
+
+
+```
+**Making predictions and evaluating predictions for the fist model.**
+
+We have applied the mode to the test set to make the first 12 predictions. From there we will iterate through the test set == my data. Then every prediction will be "fed" into the lag columns to replace the test values with the new predictions. We will make the same number of predictions as the test set since we need to compare them to generate the metrics.
+
+```{r, include=FALSE}
+test_rnf_12 <- rnf_lag0[130:159,]
+mydata <- test_rnf_12
+eval(ge_rnf_12lag$best$expressions)
+dim(test_rnf_12)
+mydata <- test_rnf_12[1,1:12]
+
+
+# initialise an array of predictions
+predict_rnf_lag12 <-c()
+
+  
+  for(i in 1:30){
+  predict_rnf_lag12[i] <- eval(ge_rnf_12lag$best$expressions)
+  # shuffle data along and insert new prediction
+  # put this in a loop for a large window size
+  mydata[12] <- mydata[11]
+  mydata[11] <- mydata[10]
+  mydata[10] <- mydata[9]
+  mydata[9] <- mydata[8]
+  mydata[8] <- mydata[7]
+  mydata[7] <- mydata[6] 
+  mydata[6] <- mydata[5]
+  mydata[5] <- mydata[4]
+  mydata[4] <- mydata[3]
+  mydata[3] <- mydata[2] 
+  mydata[2] <- mydata[1]# s
+  mydata[1] <- predict_rnf_lag12[i]}
+```
+These are the generated predictions:
+```{r}
+predict_rnf_lag12 <- data.frame(predict_rnf_lag12)
+dim(predict_rnf_lag12)
+head(predict_rnf_lag12)
+```
+To generate the RMSE ,we then take the original test set and deduct from the predictions, and take the square mean  of that. From the result we see that the model has performed very well with quite small value RMSE.Later on I provide a visual comparison between the predictions and all the models.
+```{r}
+actuals <- data.frame(test_rnf_12$x)
+head(actuals)
+
+dif <- actuals - predict_rnf_lag12
+dif <- (actuals - predict_rnf_lag12)^2
+dif
+meandf <- lapply(dif, mean, na.rm = TRUE)
+meandf<-as.numeric(meandf)
+sqrt(meandf)
+#Standard Deviation of the test_set
+sd(test_rnf_12[,1])
+```
+
+
+
+
+**Model No2: SMA rainfall data with 5 lags**
+```{r, include =FALSE}
+rnf_lag1 <- data.frame(x5=Lag(rnfSMA,5), x4=Lag(rnfSMA,4), x3=Lag(rnfSMA,3), x2=Lag(rnfSMA,2), x1=Lag(rnfSMA,1), rnfSMA)
+names(rnf_lag1) <- c('x5', 'x4','x3','x2','x1','x')
+head(rnf_lag1)
+
+train_set_5 <- data.frame(rnf_lag1[6:129,])
+test_set_5 <- data.frame(rnf_lag1[130:159,])
+head(train_set_5)
+head(test_set_5)
+
+mydata1 <- train_set_5
+
+rules1 <- list(expr = grule(op(expr, expr), func(expr), var),
+              func = grule(sin, cos, exp, log, sqrt),
+              op = grule('+', '-', '*', '/', '^'),
+              var = grule(mydata1$x5, mydata1$x4, mydata1$x3, mydata1$x2, mydata1$x1,n),
+              n = grule(1, 2, 3, 4, 5,6,7,8,9))
+
+new_Gram1 <- CreateGrammar(rules1)
+new_Gram1
+
+newFitFunc <- function(expr) {
+  result <- eval(expr)
+  if (any(is.nan(result)))
+    return(Inf)
+  return (sqrt(mean((mydata1$x - result)^2)))
+}
+
+
+
+
+```
+
+```{r, include=FALSE}
+ge1 <- GrammaticalEvolution(new_Gram1, newFitFunc, terminationCost = 0.1, max.depth = 5,optimizer = "es", wrappings = 5)
+
+```
+
+```{r}
+ge1
+gernSMA_5lag <- ge1
+gernSMA_5lag
+
+
+gernSMA_5lag$best$expressions
+
+head(eval(gernSMA_5lag$best$expressions))
+```
+```{r}
+test_set_5 <- data.frame(rnf_lag1[130:159,])
+mydata1 <- test_set_5
+head(eval(gernSMA_5lag$best$expressions))
+
+dim(test_set_5)
+#Some representative predictions before we apply to the whole test test
+mydata1 <- test_set_5[1,1:5]
+mydata1
+
+predict_rnf_lag5 <-c()
+
+for(i in 1:30){
+  predict_rnf_lag5[i] <- eval(gernSMA_5lag$best$expressions)
+  # shuffle data along and insert new prediction
+  # put this in a loop for a large window size
+  mydata1[5] <- mydata1[4]
+  mydata1[4] <- mydata1[3]
+  mydata1[3] <- mydata1[2] 
+  mydata1[2] <- mydata1[1]
+  mydata1[1] <- predict_rnf_lag5[i]}
+
+```
+
+```{r}
+predict_rnf_lag5 <-  data.frame(predict_rnf_lag5)
+head(predict_rnf_lag5)
+dim(predict_rnf_lag5)
+
+```
+Calculating the RMSE and the Sd for the second model == SME rainfall with 5 lags
+
+```{r}
+actuals1 <- data.frame(test_set_5$x)
+actuals1
+
+dif1 <- actuals1 - predict_rnf_lag5
+dif1
+dif2 <- (actuals1 - predict_rnf_lag5)^2
+dif2
+
+meandf <- lapply(dif2, mean, na.rm = TRUE)
+meandf<- as.numeric(meandf)
+sqrt(meandf)
+sd(test_set_5[,1])
+```
+Plotting our predictions against the test set for the SMA rainfall data with 12 lags and 5 lags.
+
+```{r}
+predict_rnf_lag12.ts <- data.frame(predict_rnf_lag12)
+actuals.ts <- actuals
+predict_rnf_lag5.ts <- predict_rnf_lag5
+
+plot.ts(actuals.ts, type  = "l", lwd =2, ylim = c(0, 20))
+lines(predict_rnf_lag12 , col= "blue")
+lines(predict_rnf_lag5, col = "red")
+legend("bottomright", legend = c("Test_set", "12Lag Predict", "5Lag Predict"),col = c ("black", "blue", "red"), lty=1)
+
+```
+**Reflections**
+Plotting the test set ==  real values along with the predictions.
+While the predictions do not have the original data stamp, since they have generated from time series data I plotted them as such where each prediction corresponds to one value in the x-axis. 
+We see the best performing model is the one with 12 Lags. Creating 12 Lags to capture the seasonality has maybe helped producing a better model. The model perfomrs quite well for the first observation but starts to lose the periodicity and gets out of phase . If we  had mode lags (13-15), maybe we could help the model with keeping better periodicity.
+The model with 5 lags performs also quite close to the real test set but with more noise, something that si maybe expected.WE also observe that both models can predict with somewhat good approximation the level of the rainfall. 
+
+**Holt-Winters Comparison on the rainfall data**
+
+For model comparison I have used HoltWinters which uses exponential smoothing for forecasting. We see that HW fits perfectly our data and that its predictions are astonishingly accurate. So in our case using HW would be the most recommend choice. However, we need to remember that HW is only applicable to data that have seasonal components such as ours. So in that sense GramEvol is a far more flexible modelling algorithm.
+
+```{r}
+hw <- HoltWinters(Rnfall.ts)
+plot(hw)
+lines(Rnfall.ts)
+```
+```{r}
+library(forecast)
+forecast <- forecast(hw, h=24)
+plot(forecast)
+```
+
+
+
+**Part 3: Generating Models for the Adjusted component of the rainfall data**
+
+For the last part, I will generate two models one for the trend element of the data with 5 lags and 12 lags respectively. For terms of simplicity I will only add the code as comments for the steps have been provided in model1. Because the trend element shows a lot of variation  and thre is not an obvious pattern I have tried several ways to manipulate the data in order to produce a good model. The raw trend element simply over-fitted all the time. Even when I applied SMA and Log transformation the algorithm would not return a proper model, but one of the data columns. I therefore resorted in a technique were I transfrom the data by deducting each row from its previous one by using the diff() function.
+
+```{r}
+
+rnf_trend0 <- rnfallcomponents$trend
+plot(rnf_trend0)
+
+rnf_trend1 <- diff(rnf_trend0)
+plot(rnf_trend1)
+
+rnf_trend1 <- data.frame(rnf_trend1)
+sum(is.na(rnf_trend1))
+rnf_trend1 <- na.omit(rnf_trend1)
+sum(is.na(rnf_trend1))
+dim(rnf_trend1)
+```
+After we plot the original trend data and the data after applying the diff(), we see that the data has changed greatly. It still retains a lot of its oscillatory behaviour but has lost the big fluctuations that had before.
+
+**Model 3: Trend Element of the rainfall data with 12Lags**
+
+```{r, include=FALSE}
+
+rnf_lag_trend12 <- data.frame(x12=Lag(rnf_trend1,12),x11=Lag(rnf_trend1,11),x10=Lag(rnf_trend1,10),x9=Lag(rnf_trend1,9),x8=Lag(rnf_trend1,8),x7=Lag(rnf_trend1,7),x6=Lag(rnf_trend1,6),x5=Lag(rnf_trend1,5),x4=Lag(rnf_trend1,4),x3=Lag(rnf_trend1,3), x2=Lag(rnf_trend1,2), x1=Lag(rnf_trend1,1), rnf_trend1)
+names(rnf_lag_trend12) <- c('x12', 'x11','x10','x9','x8', 'x7', 'x6', 'x5', 'x4', 'x3','x2','x1','x')
+
+
+dim(rnf_lag_trend12)
+
+sum(is.na(rnf_lag_trend12))
+rnf_lag_trend12 <- na.omit(rnf_lag_trend12)
+sum(is.na(rnf_lag_trend12))
+dim(rnf_lag_trend12)
+
+train_trend_12 <- data.frame(rnf_lag_trend12[1:110,])
+
+test_trend_12 <- data.frame(rnf_lag_trend12[111:143,])
+head(train_trend_12)
+head(test_trend_12)
+
+mydata3 <- train_trend_12
+
+rules3 <- list(expr = grule(op(expr, expr), func(expr), var),
+               func = grule(sin, cos, exp, log, sqrt),
+               op = grule('+', '-', '*', '/', '^'),
+              var = grule(mydata3$x1,mydata3$x2,mydata3$x3,mydata3$x4,
+              mydata3$x5,mydata3$x6,mydata3$x7,mydata3$x8,mydata3$x9,
+              mydata3$x10, mydata3$x11, mydata3$x12, n),
+              n = grule(1, 2, 3, 4, 5, 6, 7, 8, 9))
+            
+              
+new_Gram_lag3 <- CreateGrammar(rules3)
+new_Gram_lag3
+
+newFitFunc <- function(expr) {
+  result <- eval(expr)
+  if (any(is.nan(result)))
+    return(Inf)
+  return (sqrt(mean((mydata3$x - result)^2)))
+}
+
+
+```
+
+
+```{r, include=FALSE}
+ge3 <- GrammaticalEvolution(new_Gram_lag3, newFitFunc, terminationCost = 0.1, max.depth = 5, optimizer = "es", wrappings = 5)
+
+ge3
+```
+```{r}
+ge_trend3 <- ge3
+ge_trend3
+```
+```{r}
+test_trend_12 <- data.frame(rnf_lag_trend12[111:143,])
+mydata3 <- test_trend_12
+head(eval(ge_trend3$best$expressions))
+
+dim(test_trend_12)
+#Some representative predictions before we apply to the whole test test
+mydata3 <- test_trend_12[1,1:12]
+mydata3
+
+predict_trend_lag12 <-c()
+
+for(i in 1:33){
+  predict_trend_lag12[i] <- eval(ge_trend3$best$expressions)
+  # shuffle data along and insert new prediction
+  # put this in a loop for a large window size
+  mydata3[12] <- mydata3[11]
+  mydata3[11] <- mydata3[10]
+  mydata3[10] <- mydata3[9]
+  mydata3[9] <- mydata3[8]
+  mydata3[8] <- mydata3[7]
+  mydata3[7] <- mydata3[6] 
+  mydata3[6] <- mydata3[5]
+  mydata3[5] <- mydata3[4]
+  mydata3[4] <- mydata3[3]
+  mydata3[3] <- mydata3[2] 
+  mydata3[2] <- mydata3[1]
+  mydata3[1] <- predict_trend_lag12[i]}
+```
+
+
+
+```{r}
+actuals3 <- data.frame(test_trend_12$x)
+dim(actuals3)
+predict_trend_lag12 <- data.frame(predict_trend_lag12)
+dif1 <- actuals3 - predict_trend_lag12
+
+dif2 <- (actuals3 - predict_trend_lag12)^2
+
+
+meandf <- lapply(dif2, mean, na.rm = TRUE)
+meandf <- as.numeric(meandf)
+sqrt(meandf)
+sd(test_trend_12[,1])
+```
+The model seems to perform very well but after I plotted (see later on), we see the huge difference between the test set and the predictions.
+
+
+**Model 4: Rainfall Trend with Lag5**
+```{r, include=FALSE}
+rnf_trend_lag5 <- data.frame(x5=Lag(rnf_trend1,5), x4=Lag(rnf_trend1,4), x3=Lag(rnf_trend1,3), x2=Lag(rnf_trend1,2), x1=Lag(rnf_trend1,1), rnf_trend1)
+names(rnf_trend_lag5) <- c('x5', 'x4','x3','x2','x1','x')
+
+
+dim(rnf_trend_lag5)
+
+sum(is.na(rnf_trend_lag5))
+rnf_trend_lag5 <- na.omit(rnf_trend_lag5)
+sum(is.na(rnf_trend_lag5))
+dim(rnf_trend_lag5)
+
+train_set_5 <- data.frame(rnf_trend_lag5[6:120,])
+test_set_5 <- data.frame(rnf_trend_lag5[121:150,])
+head(train_set_5)
+head(test_set_5)
+
+mydata4 <- train_set_5
+
+rules4 <- list(expr = grule(op(expr, expr), func(expr), var),
+              func = grule(sin, cos, exp, log, sqrt),
+              op = grule('+', '-', '*', '/', '^'),
+              var = grule(mydata4$x5, mydata4$x4, mydata4$x3, mydata4$x2, mydata4$x1,n),
+              n = grule(1, 2, 3, 4, 5,6,7,8,9))
+
+new_Gram4 <- CreateGrammar(rules4)
+new_Gram4
+
+newFitFunc <- function(expr) {
+  result <- eval(expr)
+  if (any(is.nan(result)))
+    return(Inf)
+  return (sqrt(mean((mydata4$x - result)^2)))
+}
+
+
+```
+
+
+```{r, include=FALSE}
+ge4 <- GrammaticalEvolution(new_Gram4, newFitFunc, terminationCost = 0.1, max.depth = 5, optimizer = "es", wrappings = 5)
+
+ge4
+```
+
+```{r}
+ge_trend4 <- ge4
+ge_trend4
+```
+Making the predictions
+
+```{r}
+test_set_5 <- data.frame(rnf_trend_lag5[121:150,])
+mydata4 <- test_set_5
+head(eval(ge_trend4$best$expressions))
+
+dim(test_set_5)
+#Some representative predictions before we apply to the whole test test
+mydata4 <- test_set_5[1,1:5]
+mydata4
+
+predict_trend_lag5 <-c()
+
+for(i in 1:30){
+  predict_trend_lag5[i] <- eval(ge_trend4$best$expressions)
+  # shuffle data along and insert new prediction
+  # put this in a loop for a large window size
+  mydata4[5] <- mydata4[4]
+  mydata4[4] <- mydata4[3]
+  mydata4[3] <- mydata4[2] 
+  mydata4[2] <- mydata4[1]
+  mydata4[1] <- predict_trend_lag5[i]}
+```
+
+
+```{r}
+
+actuals4 <- data.frame(test_set_5$x)
+dim(actuals4)
+predict_trend_lag5 <- data.frame(predict_trend_lag5)
+dif1 <- actuals4 - predict_trend_lag5
+
+dif1 <- (actuals4 - predict_trend_lag5)^2
+
+
+meandf <- lapply(dif1, mean, na.rm = TRUE)
+meandf <- as.numeric(meandf)
+sqrt(meandf)
+sd(test_set_5[,1])
+```
+According the RMSE the model seems to perfrom really well. But this needs to be confirmed visually too.
+
+In order to reverse the predictions I need to reverse the original transformation, by adding in each row, its previous one.
+
+```{r}
+  actual_predictions <- data.frame()
+  for(i in 1:(length(actuals4)- 1)){
+  actual_predictions <- c(sum(actuals4[i,1] + actuals4[i - 1,1]))}
+
+
+```
+
+
+
+```{r}
+
+#Model3
+actuals3.ts <- actuals3
+predict_trend_lag12.ts <- data.frame(predict_trend_lag12)
+
+#Model 4
+actuals4.ts <- actuals4
+predict_trend_lag5.ts <- data.frame(predict_trend_lag5)
+
+plot.ts(actuals4.ts, type  = "l", lwd =2, main="Model Comparison")
+lines(predict_trend_lag12.ts, col= "blue")
+lines(predict_trend_lag5.ts, col = "green")
+```
+**Reflections**
+
+From the plot we see how misleading can be generating the metric RMSE vs the actual plot. We see how dramatically different are the two models from the real observations. The 12lag model has captured some of the  periodicity of the trend but has failed to capture the fluctuations.
+The 5Lag behaves similrly. The two models have performed well because in the test set, there is probably a balanced number of high and low values. This is  the same pattern for the 12LAg and 5Lag so its not surprising the RMSE is so low.  

@@ -1,0 +1,733 @@
+---
+title: "CS971"
+author: "Group 8 Maria Kalantzaki"
+date: "29/03/2021"
+output: word_document
+---
+This section of code contains the libraries which have been used.
+```{r load-packages, include=FALSE}
+library("TTR")
+library(gramEvol)
+library(quantmod)
+library(Quandl)
+library(tidyverse)
+library(tsdl)
+library(forecast)
+library(quantmod)
+library(dplyr)
+library(neuralnet)
+library(PerformanceAnalytics)
+library(DEoptim)
+library("quantmod")
+library("PerformanceAnalytics")
+library(dplyr)
+```
+**Introduction**
+
+For the purpose of this assignment we have formulated a problem of predicting the price of stock in  depth of time. We have used already available data for the stock of the biotechnology company Illumina (ILMN) and we have built a neural network for predicting future prices. We see that we can predict very reliably in depth of time and that the model has very low error. Moving forward, we needed to evaluate the model performance in terms of profit gaining. For that purpose we have used the predicted values in combination with different trading rules to calculate profit on the train and test set. We have formulated three trading rules to generate the buy/sell/hold signal. The first rule takes account only the change in price to generate the trading signal. For the second rule we have used the Relative Strength Index (RSI) for formulating the second training rule. The third training rule takes combine the Exponential Moving Average (EMA) and the RSI for a more sophisticated approach. By applying the three trading rules we see progressively a better performance and better profit return. Finally because out trading rule is based on a set values of time interval  for the EMA and RSI respectively, we have applied differential evolution in an attempt to find the best parameters that maximise return. 
+
+**Results**
+The stock data was extracted from yahoo from the beginning of January 2019 to the beginning of March 2021. The stock used was Illumina (ILMN). The first plot shows price of the stock over the window which is being looked at. The price remains relatively stable for the first year, before dropping around March 2020 and then increasing over the following year. The 5 day moving average is also plotted. This shows a smoother representation of the changes in the price of the stock.
+
+We have generated the RSI for time-intervals of 14 days, which is the most common time-frame used in technical analysis. RSI acts as an oscillator that captures the magnitude of change on the recent price and it is useful for understanding whether a stock has been oversold or overbought. When we plot the values we observe that the stock reached RSI over 70 around July 2019 at which point it was overbought, followed by a drastic selling point and a second wave of "buy" in September 2019. Generally speaking we observe that not all the big buy and sell points for this share  come at RSI <30 and RSI >70. For instance there are at least 3 big sell points around RSI~ 45 in March and September 2020. This indicates that there is some scope of optimisation for RSI as a trading marker and that the general RSI 30, 70 rule may not be very applicable in out case.
+
+
+```{r Extract Stock}
+myStocks0 <- c("ILMN")
+getSymbols(myStocks0, src="yahoo", from="2019-01-01", to="2021-03-01")
+
+# Calculate and scale RSI
+rsi <- RSI(Cl(ILMN),n=14)
+rsi <- rsi[15:543,]
+sc_rsi <- rsi$rsi/ sum(rsi$rsi)
+sc_rsi <- as.data.frame(sc_rsi)
+
+ema7 <- EMA(Cl(ILMN),n=7)
+ema21 <- EMA(Cl(ILMN),n=21)
+
+
+plot(ILMN$ILMN.Close, main="ILMN Stock Price",ylab="Prices",xlab="Date", lwd =2, ylim = c(0,500))
+lines(ema7$EMA, col= "blue") 
+lines(rsi$rsi, col = "green")
+legend(x=1, y= 95 , legend= c("ILMN_Close_Price", "EMA", "RSI_14"), col = c("Black", "blue", "green"), lty =1:2)
+
+plot(rsi, main="RSI",ylab="RSI (%)",xlab="Date", lwd =2, ylim = c(0, 100))
+
+```
+**Part1- Neural Network Implementation**
+
+The data was then prepared for use in the neural network. The closing price of the stock was used and this data was scaled. The lagged values for 14 trading days were found, along with the RSI of the stock. The RSI is plotted and it can be seen that it fluctuates quite a lot but is generally between 20% and 80%. The major element on achieving good performance was the include as many as "lags" as possible. With Lag <5 the model performance was quite low but that changed when we increased the Lag number. Another element that helped the model to "grasp" the tendency on the data was including RSI, because it captures the momentum and the magnitude of change on the price. Because ILMN shows large fluctuations in the closing price from exponential increase to exponential loss, we have found the RSI was a very reliable indicator in our case.
+
+
+```{r}
+# Scale data
+scILMN_close = ILMN$ILMN.Close  / sum(ILMN$ILMN.Close)
+
+# 14 day lagged values of scalaed data
+rnf_lag1 <- data.frame(x14=Lag(scILMN_close$ILMN.Close,14),x13=Lag(scILMN_close$ILMN.Close,13),x12=Lag(scILMN_close$ILMN.Close,12),x11=Lag(scILMN_close$ILMN.Close,11),x10=Lag(scILMN_close$ILMN.Close,10), x9=Lag(scILMN_close$ILMN.Close,9),x8=Lag(scILMN_close$ILMN.Close,8), x7=Lag(scILMN_close$ILMN.Close,7), x6=Lag(scILMN_close$ILMN.Close,6),
+  x5=Lag(scILMN_close$ILMN.Close,5), x4=Lag(scILMN_close$ILMN.Close,4), x3=Lag(scILMN_close$ILMN.Close,3), x2=Lag(scILMN_close$ILMN.Close,2), x1=Lag(scILMN_close$ILMN.Close,1), scILMN_close$ILMN.Close)
+names(rnf_lag1) <- c('x14','x13','x12', 'x11', 'x10','x9','x8','x7','x6','x5', 'x4','x3','x2','x1','x')
+rnf_lag1 <- rnf_lag1[15:543,]
+rnf_lag1 <- as.xts(rnf_lag1)
+
+
+# Create xts object of scaled rsi and scaled lag
+data <- as.xts(cbind(sc_rsi, rnf_lag1))
+
+
+```
+
+The data was split into training data and test data. Approximately 70% of the data was used for training the neural network while the remaining 30% was used for testing.
+```{r}
+# Training data
+train <- data[1:370, 1:16]
+
+# Test data
+test <- data[371:529, 1:15]
+ILMN_test <- data$x[371:529]
+colnames(ILMN_test) <- c("Test_set")
+```
+
+A neural network was run using the neuralnet library. The 14 day lagged closing stock price and the RSI were used in the neural network to predict the price for the following day. Two hidden layers were used in the model (one with 3 nodes and one with 2 nodes). The size of the hidden layers was experimented with and this combination appeared to produce the lowest RMSE value (around 20) in the test data.
+```{r}
+# Run neural net
+dnnt <- neuralnet(x~x1+x2+x3+x4+x5+x5+x6+x7+x8+x9+x10+x11+x12+x13+x14+rsi, stepmax=2000, data = train, threshold=0.000001, learningrate = 0.25, hidden= c(3,2), linear.output = T )
+dnnt$result.matrix
+
+# Plot neural network
+plot(dnnt)
+
+```
+The neural network model can then be used to predict the stock prices for the train and test data and the error of the model can be found. The predicted values are also rescaled in order for the results to be interpreted more easily. In the plot the black line shows the actual stock price and the red line shows the predicted value using the neural network, firstly for the training data and then for the unseen test data. The RMSE for the train and test data are also shown.
+```{r}
+
+# Calculate neural net predictions for train and test data
+ILMN_predictions_train  <- neuralnet::compute(dnnt, train)
+#ILMN_predictions_train_ <- data.frame(ILMN_predictions_train)
+ILMN_predictions_test <- neuralnet::compute(dnnt, test)
+
+# Re-scale train data
+rescl_ILMN_predict_train <- as.xts(ILMN_predictions_train$net.result * sum(ILMN$ILMN.Close))
+rescl_ILMN_train <- train$x * sum(ILMN$ILMN.Close)
+
+# Re-scale test data
+rescl_ILMN_test <- ILMN_test * sum(ILMN$ILMN.Close)
+rescl_ILMN_predict <- as.xts(ILMN_predictions_test$net.result *sum(ILMN$ILMN.Close))
+
+# Calculating error on the train data
+error_train = ILMN_predictions_train$net.result - train$x
+rescl_error_train <- abs(rescl_ILMN_predict_train - rescl_ILMN_train)
+
+# Calculating error on the test data
+error = ILMN_predictions_test$net.result - ILMN_test
+rescl_error <- abs(rescl_ILMN_predict - rescl_ILMN_test)
+
+# RMSE for train and test data
+RMSE_train <- sqrt(sum((rescl_ILMN_predict_train - rescl_ILMN_train)^2)/nrow(rescl_ILMN_predict_train))
+RMSE <- sqrt(sum((rescl_ILMN_predict - rescl_ILMN_test)^2)/nrow(rescl_ILMN_predict))
+print(c("RMSE for training data:", RMSE_train)) 
+print(c("RMSE for test data:", RMSE)) 
+
+# Produce dataframe showing actual prices, predicted prices and error for training data
+cleanoutput_train <- cbind(data.frame(rescl_ILMN_train),data.frame(rescl_ILMN_predict_train), data.frame(rescl_error_train))
+colnames(cleanoutput_train) <- c("Expected Output","Neural Net Output", "Error")
+cleanoutput_train <- as.xts(cleanoutput_train)
+print("Training Data")
+head(cleanoutput_train)
+
+# Produce dataframe showing actual prices, predicted prices and error for test data
+cleanoutput <- cbind(data.frame(rescl_ILMN_test), data.frame(rescl_ILMN_predict), data.frame(rescl_error))
+colnames(cleanoutput) <- c("Expected Output","Neural Net Output", "Error")
+cleanoutput <- as.xts(cleanoutput)
+print("Test Data")
+head(cleanoutput)
+
+# Plot actual price and predicted price for training data
+plot(rescl_ILMN_train, main="Train vs Train-Predictions",ylab="Prices",xlab="Date", lwd =2, ylim = c(200, 510))
+lines(rescl_ILMN_predict_train,col="violetred2")
+
+# Plot actual price and predicted price for test data
+plot(rescl_ILMN_test, main="Test vs Test-Predicted",ylab="Prices",xlab="Date", lwd =2, ylim = c(200, 510))
+lines(rescl_ILMN_predict,col="violetred2")
+
+
+
+```
+From the results obtained in the NN we see that the model performs very well and the predicted values map the test set very reliably. Similar behavour was observed for the predicted values for the train set.We also observe that the predictive power of the model has a significant depth of time (almost 8 months), which could be proven to be very beneficial for trade.
+
+
+
+
+**Part2 -Accessing model performance through trading rules**
+In order to test the model performance in profit generation we have employed different trading strategies. We have used the predicted prices to generate the trading signal and then we have back-tested the model on the train and test set.
+
+
+**Trading_Strategy_1**
+
+The first strategy uses a  simple trading rule and acts as our baseline. If the stock price is predicted to go up by over 1% the stock is bought and if it is predicted to go down by more than 1% it is sold. Otherwise no action is taken. It is assumed that once the stock has been bought, no more can be purchased until it has been sold. We have generated the trading signal based on the predicted train values and subsequently we have lead the signal by one day in the notion that since we know the prices of the next day we can execute the signal one day earlier and capitalize on that benefit. The rule is looked at for an initial investment of £10,000. The next section of code looks at the performance of this rule on the training data.
+
+A data frame is created showing the actual return, actual price, predicted price and decision, where 1 indicates a buy decision, 0 indicates no action and -1 indicates a sell action. The first 6 rows of this dataframe are shown. The profit per share and the profit for the initial investment are also shown along with a plot showing how the profit from 1 share changes over time. The same profit data is calculated and displayed for each of our trading rules for the train and test data.
+```{r}
+# Function which calculates buy/hold/sell decisions using given threshold value and returns dataframe containing actual and predicted daily returns, actual and predicted prices and the decision each day
+rule1 <- function(thresh=0.01, dat=rescl_ILMN_predict_train, dat2=rescl_ILMN_train){
+  # Find return
+  return <- dat/Lag(dat) - 1
+  # Create empty vector for signals
+  signal <- c()
+  # For loop calculates the signal for each prediction in the data starting on row 2 (due to use of lagged value for finding return)
+  for (i in 2:nrow(dat)){
+  if (return[i] > thresh){
+    signal[i]<- 1
+  } else if (return[i]< -thresh){
+    signal[i]<- -1
+  } else
+    signal[i]<- 0
+  }
+  signal <-as.data.frame(signal)
+  # Lead signal due to signal being required for previous day to stock prediction in        order to profit from price changes
+  signal <- lead(signal)
+  # Dataframe containing returns, prices (predicted and actual) and the decision on each     day
+  strategy1 <<- data.frame(dailyReturn(dat2), dailyReturn(dat), dat2,dat,signal)
+  colnames(strategy1) <<- c("Daily_Return","Daily Return predicted", "Actual Price", "Predicted Price", "Decision")
+  strategy1 <<- na.omit(strategy1)
+  signal <<- data.frame(strategy1$Decision)
+  return(head(strategy1))
+}
+# Function is run for 1% threshold values and with the training data
+rule1(thresh=0.01, dat=rescl_ILMN_predict_train, dat2=rescl_ILMN_train)
+
+# Find profit
+investment <- 10000
+profit <- 0
+profit1 <- c()
+buy <- FALSE
+buy_prices <- c()
+for(i in 1:nrow(strategy1)){
+  if (strategy1$Decision[i] == 1 & buy == FALSE){
+    buy <- TRUE
+    profit <- profit - strategy1$`Actual Price`[i]
+    profit1 <- c(profit1, profit)
+    buy_prices <- c(buy_prices, strategy1$`Actual Price`[i])
+  }
+  else if (strategy1$Decision[i] == -1 & buy == TRUE){
+    profit <- profit + strategy1$`Actual Price`[i]
+    profit1 <- c(profit1, profit)
+    buy <- FALSE
+  }
+  else{
+    profit <- profit + 0
+    profit1 <- c(profit1, profit)
+    }
+}
+if (buy==TRUE){
+  profit <- profit + strategy1$`Actual Price`[nrow(strategy1)]
+  profit1 <- c(profit1, profit)
+}
+
+print(c("profit pershare:", round(profit,2)))
+Inv_profit <-  (profit/buy_prices[1])*investment
+print(c("Investment profit:", round(Inv_profit,2)))
+total_return <- (Inv_profit + investment)/investment
+print(c("Total_return", round(total_return,2)))
+
+# Plot of profit from buying/selling 1 share at a time
+plot(profit1, type = "l", xlab = "Time", ylab = "Profit from 1 share")
+```
+It can be seen that this is a very profitable strategy with the training data with more and more profit being made each time a buy or sell decision is carried out.
+
+
+
+**Applying the Simple Trading Rule in the test set**
+We then applied the same trading rule as above in the test set using the NN predictions for generating the trading signal. We were interested to see whether the trading rule would also stand for shorter term trade.
+This section evaluates the performance of the simple trading rule  described above, using the neural network predictions over the test data.
+```{r}
+# Function is run for 1% threshold values and with the test data
+rule1(thresh=0.01, dat=rescl_ILMN_predict, dat2=rescl_ILMN_test)
+
+# Find profit
+investment <- 10000
+profit <- 0
+profit1 <- c()
+buy <- FALSE
+buy_prices <- c()
+for(i in 1:nrow(strategy1)){
+  if (strategy1$Decision[i] == 1 & buy == FALSE){
+    buy <- TRUE
+    profit <- profit - strategy1$`Actual Price`[i]
+    profit1 <- c(profit1, profit)
+    buy_prices <- c(buy_prices, strategy1$`Actual Price`[i])
+  }
+  else if (strategy1$Decision[i] == -1 & buy == TRUE){
+    profit <- profit + strategy1$`Actual Price`[i]
+    profit1 <- c(profit1, profit)
+    buy <- FALSE
+  }
+  else{
+    profit <- profit + 0
+    profit1 <- c(profit1, profit)
+    }
+}
+if (buy==TRUE){
+  profit <- profit + strategy1$`Actual Price`[nrow(strategy1)]
+  profit1 <- c(profit1, profit)
+}
+
+print(c("profit pershare:", round(profit,2)))
+Inv_profit <-  (profit/buy_prices[1])*investment
+print(c("Investment profit:", round(Inv_profit,2)))
+total_return <- (Inv_profit + investment)/investment
+print(c("Total_return", round(total_return,2)))
+
+# Plot of profit from buying/selling 1 share at a time
+plot(profit1, type = "l", xlab = "Time", ylab = "Profit from 1 share")
+```
+From the above results we see that our trading rule performs well for a shorter trading period with a total return of 1.63, which indicates a very good performance.
+
+**Trading_Strategy_2**
+
+The second strategy focuses on the RSI (relative strength index). Since the selected share shows a lot of price fluctuation we wanted to test whether RSI could be a reliable trading indicator.As described previously RSI is an indicator of the momentum of a stock. Generally, if the RSI is above 70% the stock is thought to be overbought and it would generate a sell signal (-1), whereas if it is below 30% the stock is under-bought and would generate a buy signal (1), otherwise it would be hold (0). In this case, the above threshold values were varied to maximise the profit for this particular share data. 
+
+As per above we have tested the trading strategy on the train set as well as the test set.
+
+**Applying the second training rule on the train set**
+
+We have used the predicted train values to generate the trading signal, which we then applied to the train set.
+```{r}
+# Function which calculates buy/hold/sell decisions using given threshold values and returns dataframe containing actual and predicted RSI values, actual and predicted prices and the decision each day
+rule2 <- function(x1=x1, x2=x2, day=day, dat=rescl_ILMN_predict_train, dat2=rescl_ILMN_train){
+  # Create empty vector for signals
+  signal <- c(NA)
+  day = day
+  # Find RSI of data and remove rows containing NA values (e.g. the first 14 rows)
+  rsi <- RSI(dat, day)
+  RSI <- RSI(dat2, day)
+
+  # For loop calculates the signal for each prediction in the data
+  for (i in (day+1):nrow(dat)){
+  if (rsi[i] < x1){
+    signal[i]<- 1
+  } else if (rsi[i]> x2){
+    signal[i]<- -1
+  } else
+    signal[i]<- 0
+  }
+  signal <-as.data.frame(signal)
+  # Lead signal due to signal being required for previous day to stock prediction in        order to profit from price changes
+  signal <- lead(signal)
+  # Dataframe containing RSI, prices (predicted and actual) and the decision on each         day
+  
+  strategy2 <<- data.frame(RSI, rsi, dat, dat2, signal)
+  colnames(strategy2) <<- c("RSI","Predicted RSI", "Actual Price",   "Predicted Price", "Decision")
+  strategy2 <<- na.omit(strategy2)
+  signal <<- data.frame(strategy2$Decision)
+  return(head(strategy2))
+}
+
+# Function is run with the training data
+rule2(x1=25, x2=85, day=14, dat=rescl_ILMN_predict_train, dat2=rescl_ILMN_train)
+
+# Find profit
+investment <- 10000
+profit <- 0
+profit1 <- c()
+buy <- FALSE
+buy_prices <- c()
+for(i in 1:nrow(strategy2)){
+  if (strategy2$Decision[i] == 1 & buy == FALSE){
+    buy <- TRUE
+    profit <- profit - strategy2$`Actual Price`[i]
+    profit1 <- c(profit1, profit)
+    buy_prices <- c(buy_prices, strategy2$`Actual Price`[i])
+  }
+  else if (strategy2$Decision[i] == -1 & buy == TRUE){
+    profit <- profit + strategy2$`Actual Price`[i]
+    profit1 <- c(profit1, profit)
+    buy <- FALSE
+  }
+  else{
+    profit <- profit + 0
+    profit1 <- c(profit1, profit)
+    }
+}
+if (buy==TRUE){
+  profit <- profit + strategy2$`Actual Price`[nrow(strategy2)]
+  profit1 <- c(profit1, profit)
+}
+
+print(c("profit pershare:", round(profit,2)))
+Inv_profit <-  (profit/buy_prices[1])*investment
+print(c("Investment profit:", round(Inv_profit,2)))
+total_return <- (Inv_profit + investment)/investment
+print(c("Total_return", round(total_return,2)))
+
+# Plot of profit from buying/selling 1 share at a time
+plot(profit1, type = "l", xlab = "Time", ylab = "Profit from 1 share", ylim = c(-300, 200) )
+```
+By using the RSI as a trading inidcator we observe that although we have profit we only have a couple of trading signals generated. As we have seen previously when we plotted the RSI, the big buy and sell points for this share do not really follow the 70, 30 rule. Here, we have changed the RSI values at 85 and 25 respectively, but it is likely we far from the optimal trading RSI values for this share.
+
+**Applying the second training rule on the test set**
+
+The next step was to look the strategy 2 performance in the test set.
+```{r}
+# Function is run with the test data
+rule2(x1=25, x2=85, day =14,dat=rescl_ILMN_predict, dat2=rescl_ILMN_test)
+
+# Find Profit
+investment <- 10000
+profit <- 0
+profit1 <- c()
+buy <- FALSE
+buy_prices <- c()
+for(i in 1:nrow(strategy2)){
+  if (strategy2$Decision[i] == 1 & buy == FALSE){
+    buy <- TRUE
+    profit <- profit - strategy2$`Actual Price`[i]
+    profit1 <- c(profit1, profit)
+    buy_prices <- c(buy_prices, strategy2$`Actual Price`[i])
+  }
+  else if (strategy2$Decision[i] == -1 & buy == TRUE){
+    profit <- profit + strategy2$`Actual Price`[i]
+    profit1 <- c(profit1, profit)
+    buy <- FALSE
+  }
+  else{
+    profit <- profit + 0
+    profit1 <- c(profit1, profit)
+    }
+}
+if (buy==TRUE){
+  profit <- profit + strategy2$`Actual Price`[nrow(strategy2)]
+  profit1 <- c(profit1, profit)
+}
+
+print(c("profit pershare:", round(profit,2)))
+Inv_profit <-  (profit/buy_prices[1])*investment
+print(c("Investment profit:", round(Inv_profit,2)))
+total_return <- (Inv_profit + investment)/investment
+print(c("Total_return", round(total_return,2)))
+
+# Plot of profit from buying/selling 1 share at a time
+plot(profit1, type = "l", xlab = "Time", ylab = "Profit from 1 share")
+```
+Similar to our previous observations on the train set we see that while we do not experience losses, we do not generate high profit either. As explained before this is likely to be because we have not found the optimal RSI trading values for this share.
+
+**Trading_Strategy_3**
+
+Because the RSI trading rule  did not generate the level of return that the simple trading rule did, we chose to combine RSI with the exponential moving average (EMA), to better capture the momentum to the price. EMA is considered a reliable indicator that reacts faster when the price is changing, but is also vulnerable to giving wrong signal too early. However, since the RSI trading rule only gave a couple of trading points, by applying  EMA, we may be able to have more trading points that capture the price changes better. In this case, we have calculated a 9 period EMA which is very fast moving and a long term EMA signal 100,which is more accurate and we have used their ratio as a trading inidicator for a buy signal.
+
+```{r}
+# Function which calculates buy/hold/sell decisions using given certain values and returns dataframe containing actual and predicted return values, actual and predicted prices and the decision each day
+
+tr_rule3 = function(data1=data1, data2 = data2, delta=delta, S=S, L=L, day=day, x=x){
+
+    delta <- delta
+    price <- data.frame(data1)
+
+    #print(price)
+    #print(price)
+    emaS <- EMA(data1, S)
+    emaL <- EMA(data1, L)
+    signal3 <- c()
+    ratio_EMA  <- (emaL / emaS) - 1
+    day <- day
+    rsi <- RSI(data1, day)
+    #print(head(rsi))
+    
+    for (i in (L+1):nrow(data1)){
+      #print(i)
+      if(ratio_EMA$EMA[i] > delta){
+        signal3[i] <- 1}
+      #print(signal3)} # buy}
+      else if (rsi[i] > x ){
+        signal3[i] <- -1}
+      else {signal3[i] <- 0}}
+    
+    trade3 <- lead(signal3)
+
+    trade3 <- data.frame(trade3)
+    
+    rescl_ILMN_predict_train
+    rescl_ILMN_train   
+    strategy_3 <<- data.frame(dailyReturn(data1), dailyReturn(data1), data1, data2, trade3)
+    colnames(strategy_3) <<- c("Daily Return","Predicted Daily Return", "Actual Price",   "Predicted Price", "Decision")
+    strategy_3 <<- na.omit(strategy_3)
+return(head(strategy_3))}
+
+# Function is run with the training data
+tr_rule3(data1 =rescl_ILMN_predict_train, data2 =rescl_ILMN_train,  delta=0.001, S=10, L=100, day=14, x=85)
+    
+# Find profit
+    profit3 <- 0
+    profit1 <- c()
+    buy <- FALSE
+    buy_prices <- c()
+    for(i in 1:(nrow)(strategy_3)) {
+      #print(i)
+      
+      if (strategy_3$Decision[i] == 1 & buy == FALSE){
+        buy <- TRUE
+        
+        profit3 <- profit3 - strategy_3$`Actual Price`[i]
+        profit1 <- c(profit1, profit3)
+        buy_prices <- c(buy_prices, strategy_3$`Actual Price`[i])}
+
+      else if (strategy_3$Decision[i] == -1 & buy == TRUE) {
+        buy <- FALSE
+        profit3 <- profit3 + strategy_3$`Actual Price`[i]
+ 
+        profit1 <- c(profit1, profit3)}
+      else{profit3 <- profit3 + 0
+      profit1 <- c(profit1, profit3)
+    }}
+if (buy==TRUE){
+  profit3 <- profit3 + strategy_3$`Actual Price`[nrow(strategy_3)]
+  profit1 <- c(profit1, profit3)}
+  
+
+print(c("profit pershare:", round(profit3,2)))
+Inv_profit <-  (profit3/buy_prices[1])*investment
+print(c("Investment profit:", round(Inv_profit,2)))
+total_return <- (Inv_profit + investment)/investment
+print(c("Total_return", round(total_return,2)))
+
+# Plot of profit from buying/selling 1 share at a time
+plot(profit1, type = "l", xlab = "Time", ylab = "Profit from 1 share")
+```
+When we apply the third trading rule that combine RSI and EMA we observe similar return to the trading strategy2. This is because we are bound by the RSI for selling ,so even if the EMA has generated a lot of buying points we can only execute once we sell which is controlled by the RSI.
+
+**Applying trading_rule_3 to the test set**
+We have used the NN predictions to generate teh signal and then we have applied the signal to the test set to calculate our return.
+
+
+```{r}
+# Function is run with the test data
+tr_rule3(data1 =rescl_ILMN_predict, data2 =rescl_ILMN_test,  delta=0.001, S=10, L=100, day=14, x=85)
+    
+# Find profit  
+    profit3 <- 0
+    profit1 <- c()
+    buy <- FALSE
+    buy_prices <- c()
+    for(i in 1:(nrow)(strategy_3)) {
+      #print(i)
+      
+      if (strategy_3$Decision[i] == 1 & buy == FALSE){
+        buy <- TRUE
+        
+        profit3 <- profit3 - strategy_3$`Actual Price`[i]
+        profit1 <- c(profit1, profit3)
+        buy_prices <- c(buy_prices, strategy_3$`Actual Price`[i])}
+
+      else if (strategy_3$Decision[i] == -1 & buy == TRUE) {
+        buy <- FALSE
+        profit3 <- profit3 + strategy_3$`Actual Price`[i]
+        print(profit3)
+ 
+        profit1 <- c(profit1, profit3)}
+      else{profit3 <- profit3 + 0
+      profit1 <- c(profit1, profit3)
+    }}
+if (buy==TRUE){
+  profit3 <- profit3 + strategy_3$`Actual Price`[nrow(strategy_3)]
+  profit1 <- c(profit1, profit3)}
+  
+
+print(c("profit pershare:", round(profit3,2)))
+Inv_profit <-  (profit3/buy_prices[1])*investment
+print(c("Investment profit:", round(Inv_profit,2)))
+total_return <- (Inv_profit + investment)/investment
+print(c("Total_return", round(total_return,2)))
+
+# Plot of profit from buying/selling 1 share at a time
+plot(profit1, type = "l", xlab = "Time", ylab = "Profit from 1 share")
+```
+
+Similar to above we see that we are bound by the RSI for selling, so although we have many buy points generated by the EMA we do not have enough sell points.
+
+
+
+
+**Part3 Trading Strategy Optimization**
+We have chosen to apply Differential Evolution to optimise the third strategy. We aim to optimize all parameters to find the best combination. Our fitness function is the trading strategy itself.Since DeEvol is a minimizing algorithm the output of the fitness function will be negative. We have controlled the number of parents(NP) to be more than 10 times the number of parameters we optimise, and we have restricted the weight factor F =0.8 and crossover at CR=0.9. Generally speaking DEvol is more sensitive to weight factorF and by reducing F we saw better results.
+
+```{r, echo=T, include=FALSE}
+data1 =rescl_ILMN_predict
+data2 =rescl_ILMN_test
+
+
+
+trd_rule = function(data1=data1, data2 =data2, delta=delta, S=S, L=L, day=day, x=x){
+    delta <- delta
+    price <- data.frame(data1)
+
+    #print(price)
+    #print(price)
+    emaS <- EMA(data1, S)
+    emaL <- EMA(data1, L)
+    signal3 <- c()
+    ratio_EMA  <- (emaL / emaS) - 1
+    day <- day
+    rsi <- RSI(data1, day)
+    #print(head(rsi))
+    
+    for (i in (L+1):nrow(data1)){
+      #print(i)
+      if(ratio_EMA$EMA[i] > delta){
+        signal3[i] <- 1}
+      #print(signal3)} # buy}
+      else if (rsi[i] > x ){
+        signal3[i] <- -1}
+      else {signal3[i] <- 0}}
+
+    
+    trade3 <- lead(signal3)
+
+    trade3 <- data.frame(trade3)
+    
+  
+ 
+    rescl_ILMN_predict_train
+    rescl_ILMN_train   
+    strategy_3 <<- data.frame(dailyReturn(data1), dailyReturn(data1), data1, data2, trade3)
+    colnames(strategy_3) <<- c("Daily Return","Predicted Daily Return", "Actual Price",   "Predicted Price", "Decision")
+    strategy_3 <<- na.omit(strategy_3)
+    head(strategy_3)
+    
+  
+    profit3 <- 0
+    profit1 <- c()
+    buy <- FALSE
+    buy_prices <- c()
+    
+    for(i in 1:(nrow)(strategy_3)) {
+      #print(i)
+      
+      if (strategy_3$Decision[i] == 1 & buy == FALSE){
+        buy <- TRUE
+        
+        profit3 <- profit3 - strategy_3$`Actual Price`[i]
+
+        profit1 <- c(profit1, profit3)
+        buy_prices <- c(buy_prices, strategy_3$`Actual Price`[i])}
+
+      else if (strategy_3$Decision[i] == -1 & buy == TRUE) {
+        buy <- FALSE
+        profit3 <- profit3 + strategy_3$`Actual Price`[i]
+  
+ 
+        profit1 <- c(profit1, profit3)}
+      else{profit3 <- profit3 + 0
+      profit1 <- c(profit1, profit3)
+    }}
+if (buy==TRUE){
+  profit3 <- profit3 + strategy_3$`Actual Price`[nrow(strategy_3)]
+  profit1 <- c(profit1, profit3)}
+    
+profit3 <- round(profit3,2)
+    
+return(-profit3)}
+  
+
+toOptim = function(n){
+  if  (n[5] > n[3] & n[3] > n[2] & n[3] > n[4]){
+    trd_rule(data1, data2,n[1], n[2], n[3], n[4], n[5])}
+  else
+    return (-1000)} #negative score 
+
+  
+  
+
+fnmap_f <- function(x) {c(round(x,0))} # we round the numbers to be integers
+
+LOWER = c(0,1,21,1,26)
+UPPER = c(0.5,25,110,100,100)
+
+fn = function(x){-toOptim(x)}
+
+r <- DEoptim(fn = toOptim,lower=LOWER, upper=UPPER,fnMap = fnmap_f, DEoptim.control(NP = 80,
+itermax = 800, F = 1.2, CR = 0.9))
+
+```
+
+```{r}
+op = r$optim$bestmem
+op
+```
+We have recorded some optmisation values  from different runs. We see that all the optimisation algorithm works well and by tuning the weight and crossover values the  profit pe share has increase significantly compared to our manual optimisation for strategy3. WE are not sure whether this is the optimal return values since we have not exhausted optimizing number of iterations etc but for sure the improvement is very significant. 
+```{r}
+
+
+profit3_1 <- abs(trd_rule(data1=data1, data2=data2, delta=0, S=3, L=88, day=79, x=58))
+print(c("profit3-3 pershare:", round(profit3_1,2)))
+
+profit3_2 <- abs(trd_rule(data1=data1, data2=data2, delta=0, S=3, L=88, day=48, x=75))
+print(c("profit3-3 pershare:", round(profit3_2,2)))
+
+
+profit3_3 <- abs(trd_rule(data1=data1, data2=data2, delta=0, S=8, L=97, day=17, x=54))
+print(c("profit3-2 pershare:", round(profit3_3,2)))
+
+profit3_4 <- abs(trd_rule(data1=data1, data2=data2, delta=0, S=2, L=49, day=55, x=91))
+print(c("profit3-1 pershare:", round(profit3_4,2)))
+
+
+```
+
+**Calculating total profit for the Differential Evolution parameters**
+```{r}
+# Function is run with the test data
+tr_rule3(data1 =rescl_ILMN_predict, data2 =rescl_ILMN_test,  delta=0.0, S=3, L=88, day=48, x=75)
+    
+# Find profit  
+    profit3 <- 0
+    profit1 <- c()
+    buy <- FALSE
+    buy_prices <- c()
+    for(i in 1:(nrow)(strategy_3)) {
+      #print(i)
+      
+      if (strategy_3$Decision[i] == 1 & buy == FALSE){
+        buy <- TRUE
+        
+        profit3 <- profit3 - strategy_3$`Actual Price`[i]
+        profit1 <- c(profit1, profit3)
+        buy_prices <- c(buy_prices, strategy_3$`Actual Price`[i])}
+
+      else if (strategy_3$Decision[i] == -1 & buy == TRUE) {
+        buy <- FALSE
+        profit3 <- profit3 + strategy_3$`Actual Price`[i]
+ 
+        profit1 <- c(profit1, profit3)}
+      else{profit3 <- profit3 + 0
+      profit1 <- c(profit1, profit3)
+    }}
+if (buy==TRUE){
+  profit3 <- profit3 + strategy_3$`Actual Price`[nrow(strategy_3)]
+  profit1 <- c(profit1, profit3)}
+  
+
+print(c("profit pershare:", round(profit3,2)))
+Inv_profit <-  (profit3/buy_prices[1])*investment
+print(c("Investment profit:", round(Inv_profit,2)))
+total_return <- (Inv_profit + investment)/investment
+print(c("Total_return", round(total_return,2)))
+
+# Plot of profit from buying/selling 1 share at a time
+plot(profit1, type = "l", xlab = "Time", ylab = "Profit from 1 share")
+```
+
+
+**Conclusion**
+
+We have chosen to address the given problem by applying a combination of techniques. Initially, we have built a Neural Net model which is able to perform very accurate long term predictions of our asset. We have seen that the model performance is very good for both for the training and the test set. The neural net performed reasonably well with an RMSE value of around 6 for the training data and 20 for the test data. During this period the stock price varied between 200 and approximately 500 dollars.We have used RSI as a technical indicator to improve the model performance and capture the rate of change within the data. We then have used our predictions to generate a trading signal which we applied on the train and test set. 
+
+We have relied on three different trading rules  to generate the buy/sell signal. Our first rule relied simply on the percentage of change to generate the trading signal and it has proven to be the most profitable of all, returning a profit of around 610 dollars per share for the training data and 450 dollars per share for the test data. 
+
+The second trading rule uses RSI as a trading indicator. However, as we observed the major turning points of this share do not follow the 70/30 rule. As such we were bound by that and our trading strategy did not generate many buy- selling points. To address this we added EMA as an additional indicator because it is known to capture fast changes and generates more frequent buy signals. By using the ration of EMA, we were able to generate much more buying signals but since we were still bound from the RSI we  did not significantly improve our profit. However it was clear that both RSI as well as RSI/EMA strategies work best in the test set , which is a narrower window of data. This is not surprising since both RSI and EMA are capturing the short term momentum of the price.
+
+Since  we experience low return with the last two trading rules, we decided to apply Differential Evolution as an optimization technique on our third strategy , to optimise for the different parameters. The advantage of using Differential Evolution is that is  a population-based metaheuristic search algorithm that optimizes a problem by improving a candidate solution based on an evolutionary process. Such algorithms make few or no assumptions about the underlying optimization problem and can quickly explore very large design spaces. From our results we see that all combinations of parameters were able to generate significant profit compared to the manual optimization. We also see that the optimal values for this share are very different from the conventional ranges in  a trading strategy. For instance our short EMA=3, is much lower to the usual 9. This may have to do with the very rapid changes this share is experiencing. Similarly, normally the best medium term EMA is thought to be EMA21. In our case is 88, which is more of a long term signal. And the RSI is far from the conventional 14 days. All this shows the powerful contribution of the genetic algorithms.
+
+In conclusion, we were able to apply a very profitable trading strategy to our dataset (trading strategy1, strategy3 with optimization), although all trading strategies had positive return. Upon reflection it may have been better  to use a different trading indicator than RSI. Maybe for this particular asset because it seems  to quite unstable over periods of time, it would have been better to use a trend indicator such as EMA in combination with a volatile indicator, that takes into account the long term behaviour of the asset.
+
+
+
